@@ -285,6 +285,15 @@ class FitFunctions:
         ndim = self.ndim
         modes = self.modes
 
+        isnan = np.isnan
+        nansum = np.nansum
+
+        def sum_pixels(values, axis=None):
+            # Avoid nansum's copy when there are no NaNs to replace.
+            if type(values) is np.ndarray and not isnan(values).any():
+                return values.sum(axis=axis)
+            return nansum(values, axis=axis)
+
         def residual(vect):
             if np.any(np.isnan(vect)):
                 raise RefineException('Parameters contained NaN values.')
@@ -298,7 +307,7 @@ class FitFunctions:
                     r2 = r2_fun(mesh[:, mask], params[i])
                     signal = params[i, 1]
                     diff[mask] -= signal * model_fun(r2, params[i, -n_fun_params:], ndim)
-                result += np.nansum(diff**2) / len(image)  # residual is per pixel
+                result += sum_pixels(diff**2) / len(image)  # residual is per pixel
             return result / norm
 
         if not self.has_jacobian:
@@ -317,8 +326,9 @@ class FitFunctions:
                 # array containing all derivatives
                 derivs = np.zeros((n_cluster, n_vars - 1, len(image)))
                 for j, (i, mask) in enumerate(zip(indices, masks_cl)):
-                    r2 = r2_fun(mesh[:, mask], params[i])
-                    dr2dx = dr2_fun(mesh[:, mask], params[i])
+                    mesh_masked = mesh[:, mask]
+                    r2 = r2_fun(mesh_masked, params[i])
+                    dr2dx = dr2_fun(mesh_masked, params[i])
                     signal = params[i, 1]
                     model, deriv = model_dfun(r2, params[i, -n_fun_params:], ndim)
                     assert len(deriv) == n_fun_params + 1
@@ -326,15 +336,17 @@ class FitFunctions:
                     # model derivative wrt signal
                     derivs[j, 0, mask] = model
                     # evaluate model derivs wrt centers/sizes with chain rule
-                    # numpy apparently transposes the left array ??
-                    derivs[j, 1:1 + len(dr2dx), mask] = signal * (deriv[0] * dr2dx).T
+                    # Select parameter rows before applying the pixel mask.
+                    derivs[j, 1:1 + len(dr2dx)][:, mask] = signal * (deriv[0] * dr2dx)
                     # other derivatives
                     if n_fun_params > 0:
-                        derivs[j, -n_fun_params:, mask] = signal * np.array(deriv[1:]).T
+                        derivs[j, -n_fun_params:][:, mask] = signal * np.array(deriv[1:])
                 # residual is per pixel
-                result[indices, 1:] = np.nansum(-2 * diff * derivs, axis=2) / len(image)
+                weighted_diff = -2 * diff
+                derivs *= weighted_diff
+                result[indices, 1:] = sum_pixels(derivs, axis=2) / len(image)
                 # background derivatives will be summed, so divide by n_cluster
-                result[indices, 0] = np.nansum(-2 * diff) / (n_cluster * len(image))
+                result[indices, 0] = sum_pixels(weighted_diff) / (n_cluster * len(image))
 
             return vect_from_params(result, modes, groups, operation=np.sum) / norm
 
