@@ -285,17 +285,27 @@ class FitFunctions:
         ndim = self.ndim
         modes = self.modes
 
+        # Reuse invariant masked coordinates across optimizer callbacks.
+        masked_meshes = {}
+
+        def get_mesh(cluster_index, feature_index, mesh, mask):
+            key = (cluster_index, feature_index)
+            if key not in masked_meshes:
+                masked_meshes[key] = mesh[:, mask]
+            return masked_meshes[key]
+
         def residual(vect):
             if np.any(np.isnan(vect)):
                 raise RefineException('Parameters contained NaN values.')
             params = vect_to_params(vect, params_const, modes, groups)
             result = 0.
-            for indices, image, mesh, masks_cl in zip(cl_groups, images, meshes,
-                                                      masks):
+            for cluster_index, (indices, image, mesh, masks_cl) in enumerate(
+                    zip(cl_groups, images, meshes, masks)):
                 background = params[indices[0], 0]
                 diff = image - background
-                for i, mask in zip(indices, masks_cl):
-                    r2 = r2_fun(mesh[:, mask], params[i])
+                for j, (i, mask) in enumerate(zip(indices, masks_cl)):
+                    mesh_feature = get_mesh(cluster_index, j, mesh, mask)
+                    r2 = r2_fun(mesh_feature, params[i])
                     signal = params[i, 1]
                     diff[mask] -= signal * model_fun(r2, params[i, -n_fun_params:], ndim)
                 result += np.nansum(diff**2) / len(image)  # residual is per pixel
@@ -309,16 +319,17 @@ class FitFunctions:
                 raise RefineException('Parameters contained NaN values.')
             params = vect_to_params(vect, params_const, modes, groups)
             result = params.copy()
-            for indices, image, mesh, masks_cl in zip(cl_groups, images, meshes,
-                                                      masks):
+            for cluster_index, (indices, image, mesh, masks_cl) in enumerate(
+                    zip(cl_groups, images, meshes, masks)):
                 n_cluster = len(indices)
                 background = params[indices[0], 0]
                 diff = image - background
                 # array containing all derivatives
                 derivs = np.zeros((n_cluster, n_vars - 1, len(image)))
                 for j, (i, mask) in enumerate(zip(indices, masks_cl)):
-                    r2 = r2_fun(mesh[:, mask], params[i])
-                    dr2dx = dr2_fun(mesh[:, mask], params[i])
+                    mesh_feature = get_mesh(cluster_index, j, mesh, mask)
+                    r2 = r2_fun(mesh_feature, params[i])
+                    dr2dx = dr2_fun(mesh_feature, params[i])
                     signal = params[i, 1]
                     model, deriv = model_dfun(r2, params[i, -n_fun_params:], ndim)
                     assert len(deriv) == n_fun_params + 1
@@ -332,7 +343,10 @@ class FitFunctions:
                     if n_fun_params > 0:
                         derivs[j, -n_fun_params:, mask] = signal * np.array(deriv[1:]).T
                 # residual is per pixel
-                result[indices, 1:] = np.nansum(-2 * diff * derivs, axis=2) / len(image)
+                derivs *= -2 * diff
+                # The derivative workspace is no longer needed after reduction.
+                derivs[np.isnan(derivs)] = 0.
+                result[indices, 1:] = np.sum(derivs, axis=2) / len(image)
                 # background derivatives will be summed, so divide by n_cluster
                 result[indices, 0] = np.nansum(-2 * diff) / (n_cluster * len(image))
 
